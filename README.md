@@ -1,6 +1,6 @@
 # ExBanking
 
-**TODO: Add description**
+## Simple OTP application to perform basic transaction
 
 ## Installation
 
