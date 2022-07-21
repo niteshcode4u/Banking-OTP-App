@@ -15,10 +15,13 @@ defmodule ExBanking.UserSupervisor do
     DynamicSupervisor.init(strategy: :one_for_one)
   end
 
-  @spec start_child(String.t()) :: DynamicSupervisor.on_start_child()
+  @spec start_child(String.t()) :: :ok | :user_exist
   def start_child(user) do
     child = {ExBanking.Managers.UserManager, user: user}
 
-    DynamicSupervisor.start_child(__MODULE__, child)
+    case DynamicSupervisor.start_child(__MODULE__, child) do
+      {:ok, _pid} -> :ok
+      {:error, {:already_started, _pid}} -> :user_exist
+    end
   end
 end

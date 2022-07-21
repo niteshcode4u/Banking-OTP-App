@@ -10,7 +10,7 @@ defmodule ExBanking.Core.User do
   @spec new(String.t()) :: %{:__struct__ => atom}
   def new(user) do
     fields = %{
-      user: String.downcase(user),
+      user: user,
       funds: %{}
     }
 

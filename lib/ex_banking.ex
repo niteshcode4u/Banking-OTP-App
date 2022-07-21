@@ -5,6 +5,7 @@ defmodule ExBanking do
 
   alias ExBanking.Core.User
   alias ExBanking.Managers.UserManager
+  alias ExBanking.UserSupervisor
 
   @doc """
   Function creates new user in the system
@@ -25,15 +26,10 @@ defmodule ExBanking do
   @spec create_user(user :: String.t()) :: :ok | {:error, :wrong_arguments | :user_already_exists}
   def create_user(user) when is_binary(user) do
     user
-    |> String.downcase()
-    |> UserManager.get_user()
+    |> UserSupervisor.start_child()
     |> case do
-      :empty ->
-        ExBanking.UserSupervisor.start_child(user)
-        UserManager.create(user)
-
-      {:ok, _user} ->
-        {:error, :user_already_exists}
+      :ok -> UserManager.create(user)
+      :user_exist -> {:error, :user_already_exists}
     end
   end
 
@@ -44,14 +40,10 @@ defmodule ExBanking do
   Returns new_balance of the user in given format
 
   ## Examples
-
       iex> ExBanking.deposit("nitesh", 1, "INR")
-      :ok
+      {:ok, 1}
 
       iex> ExBanking.deposit("nitesh", 12, 123)
-      {:error, :wrong_arguments}
-
-      iex> ExBanking.deposit("nitesh", 0, "INR")
       {:error, :wrong_arguments}
 
       iex> ExBanking.deposit("Mishra", 1, "INR")
@@ -68,8 +60,6 @@ defmodule ExBanking do
         {:error, :user_does_not_exist}
 
       {:ok, user_details} ->
-        currency = String.upcase(currency)
-
         params = %User{
           user: user_details.user,
           funds:
@@ -78,7 +68,13 @@ defmodule ExBanking do
             end)
         }
 
-        UserManager.update_balance(params)
+        case UserManager.update_balance(params) do
+          :max_request_reached ->
+            {:error, :too_many_requests_to_user}
+
+          user_details ->
+            {:ok, user_details.funds[currency]}
+        end
     end
   end
 
@@ -91,7 +87,7 @@ defmodule ExBanking do
   ## Examples
 
       iex> ExBanking.withdraw("nitesh", 1, "INR")
-      :ok
+      {:ok, 1}
 
       iex> ExBanking.withdraw("nitesh", 1, 22)
       {:error, :wrong_arguments}
@@ -116,9 +112,7 @@ defmodule ExBanking do
   def withdraw(user, amount, currency)
       when is_binary(user) and is_binary(currency) and is_number(amount) and amount > 0 do
     with {:ok, user_details} <- UserManager.get_user(user),
-         true <- user_details.funds[currency] > amount do
-      currency = String.upcase(currency)
-
+         true <- (user_details.funds[currency] || 0.0) > amount do
       params = %User{
         user: user_details.user,
         funds:
@@ -127,7 +121,13 @@ defmodule ExBanking do
           end)
       }
 
-      UserManager.update_balance(params)
+      case UserManager.update_balance(params) do
+        :max_request_reached ->
+          {:error, :too_many_requests_to_user}
+
+        user_details ->
+          {:ok, user_details.funds[currency]}
+      end
     else
       :empty ->
         {:error, :user_does_not_exist}
@@ -145,7 +145,7 @@ defmodule ExBanking do
   ## Examples
 
       iex> ExBanking.get_balance("nitesh", "INR")
-      {:ok, 37}
+      {:ok, 1}
 
       iex> ExBanking.get_balance("nitesh", 123)
       {:error, :wrong_arguments}
@@ -158,14 +158,14 @@ defmodule ExBanking do
           | {:error, :wrong_arguments | :user_does_not_exist | :too_many_requests_to_user}
 
   def get_balance(user, currency) when is_binary(user) and is_binary(currency) do
-    currency = String.upcase(currency)
-
-    case UserManager.get_user(user) do
+    case UserManager.get_balance(user) do
       :empty ->
         {:error, :user_does_not_exist}
 
+      :max_request_reached ->
+        {:error, :too_many_requests_to_sender}
+
       {:ok, user_details} ->
-        IO.inspect(user_details)
         {:ok, user_details.funds[currency] || 0.0}
     end
   end
@@ -179,17 +179,23 @@ defmodule ExBanking do
 
   ## Examples
 
-      iex> ExBanking.send("nitesh", "krishna", 10, "INR")
+      iex> ExBanking.send("nitesh", "mishra", 10, "INR")
       :ok
 
-      iex> ExBanking.send("nitesh", "krishnDa", 10, "INR")
+      iex> ExBanking.send("nitesh", "mishra", 10, "INR")
       {:error, :receiver_does_not_exist}
 
-      iex> ExBanking.send("niteshE", "krishnDa", 10, "INR")
+      iex> ExBanking.send("niteshE", "mishra", 10, "INR")
       {:error, :sender_does_not_exist}
 
-      iex> ExBanking.send("nitesh", "krishna", 10, "INR")
+      iex> ExBanking.send("nitesh", "mishra", 10, "INR")
       {:error, :not_enough_money}
+
+      iex> ExBanking.send("nitesh", "mishra", 10, "INR")
+      {:error, :too_many_requests_to_sender}
+
+      iex> ExBanking.send("nitesh", "mishra", 10, "INR")
+      {:error, :too_many_requests_to_receiver}
 
   """
   @spec send(
@@ -209,12 +215,9 @@ defmodule ExBanking do
   def send(from_user, to_user, amount, currency)
       when is_binary(from_user) and is_binary(to_user) and is_binary(currency) and
              is_number(amount) and amount > 0 do
-
-    with {:from, {:ok, from_user_details}} <- {:from, UserManager.get_user(from_user)} |> IO.inspect(label: "from"),
-         {:to, {:ok, to_user_details}} <- {:to, UserManager.get_user(to_user)} |> IO.inspect(label: "to"),
-         currency <- String.upcase(currency),
-         true <- (from_user_details.funds[currency] >= amount) do
-
+    with {:from, {:ok, from_user_details}} <- {:from, UserManager.get_user(from_user)},
+         {:to, {:ok, to_user_details}} <- {:to, UserManager.get_user(to_user)},
+         true <- (from_user_details.funds[currency] || 0.0) >= amount do
       from_user_params = %User{
         user: from_user_details.user,
         funds:
@@ -222,8 +225,6 @@ defmodule ExBanking do
             Float.floor((currency_balance - amount) / 1, 2)
           end)
       }
-
-      UserManager.update_balance(from_user_params)
 
       to_user_params = %User{
         user: to_user_details.user,
@@ -233,7 +234,14 @@ defmodule ExBanking do
           end)
       }
 
-      UserManager.update_balance(to_user_params)
+      from_user_details = UserManager.update_balance(from_user_params)
+      to_user_details = UserManager.update_balance(to_user_params)
+
+      cond do
+        from_user_details == :max_request_reached -> {:error, :too_many_requests_to_sender}
+        to_user_details == :max_request_reached -> {:error, :too_many_requests_to_receiver}
+        true -> {:ok, from_user_details.funds[currency]}
+      end
     else
       {:from, :empty} ->
         {:error, :sender_does_not_exist}
